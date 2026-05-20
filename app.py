@@ -1,15 +1,15 @@
 """
-Nandi LLM Arena — Investment Committee Multi-Model Chatbot
-Type once, see all model responses side-by-side in real time.
+Nandi LLM Arena — Investment Committee Demo
+Live multi-model chat via Groq + Nandi technical analysis.
 """
 
 import time
 import concurrent.futures
 
+import requests
 import streamlit as st
 import plotly.graph_objects as go
 import pandas as pd
-from huggingface_hub import InferenceClient
 
 st.set_page_config(
     page_title="Nandi LLM Arena",
@@ -27,12 +27,10 @@ st.markdown("""
     margin: 16px 0 8px 0;
     font-size: 15px;
     color: #e6edf3;
-    display: inline-block;
-    max-width: 100%;
   }
   .model-header {
     border-radius: 8px 8px 0 0;
-    padding: 8px 12px;
+    padding: 8px 12px 6px 12px;
     font-size: 12px;
     font-weight: 700;
     border-left: 4px solid;
@@ -43,7 +41,7 @@ st.markdown("""
     border-top: none;
     border-radius: 0 0 8px 8px;
     padding: 12px 14px;
-    min-height: 100px;
+    min-height: 110px;
     font-size: 13px;
     line-height: 1.8;
     white-space: pre-wrap;
@@ -59,67 +57,60 @@ st.markdown("""
     font-size: 12px;
     color: #fca5a5;
   }
-  .timing { font-size: 11px; color: #6e7681; margin-top: 4px; text-align: right; }
-  .starter-chip {
-    display: inline-block;
-    background: #21262d;
-    border: 1px solid #30363d;
-    border-radius: 20px;
-    padding: 6px 14px;
+  .nandi-panel {
+    background: #1a0f00;
+    border: 2px dashed #FF6B35;
+    border-radius: 8px;
+    padding: 14px;
     font-size: 13px;
-    color: #c9d1d9;
-    cursor: pointer;
-    margin: 4px;
+    color: #e6edf3;
+    min-height: 145px;
   }
+  .timing { font-size: 11px; color: #6e7681; margin-top: 4px; text-align: right; }
   [data-testid="stButton"] > button {
     background: linear-gradient(135deg, #FF6B35, #f7931e);
     color: white; font-weight: 700; border: none;
     border-radius: 8px; padding: 8px 24px;
   }
+  code { font-size: 12px; }
 </style>
 """, unsafe_allow_html=True)
 
-# ── Models ─────────────────────────────────────────────────────────────────────
-MODELS = {
-    "Nandi-600M ⭐": {
-        "id": "FrontiersMind/Nandi-Mini-600M-Early-Checkpoint",
-        "color": "#FF6B35", "type": "base",
-        "params": "600M", "note": "20% trained • Indic-optimised", "highlight": True,
+# ── Groq model registry ────────────────────────────────────────────────────────
+GROQ_MODELS = {
+    "Llama 3.2 · 1B": {
+        "id": "llama-3.2-1b-preview",
+        "color": "#3498DB",
+        "params": "1B",
+        "note": "Meta · similar size to Nandi",
     },
-    "Sarvam-2B": {
-        "id": "sarvamai/sarvam-2b-v0.5",
-        "color": "#F39C12", "type": "instruct",
-        "params": "2B", "note": "Indic specialist • Sarvam AI", "highlight": False,
+    "Llama 3.2 · 3B": {
+        "id": "llama-3.2-3b-preview",
+        "color": "#9B59B6",
+        "params": "3B",
+        "note": "Meta",
     },
-    "SmolLM2-360M": {
-        "id": "HuggingFaceTB/SmolLM2-360M-Instruct",
-        "color": "#2ECC71", "type": "instruct",
-        "params": "360M", "note": "HuggingFace", "highlight": False,
+    "Gemma 2 · 9B": {
+        "id": "gemma2-9b-it",
+        "color": "#2ECC71",
+        "params": "9B",
+        "note": "Google",
     },
-    "SmolLM2-1.7B": {
-        "id": "HuggingFaceTB/SmolLM2-1.7B-Instruct",
-        "color": "#9B59B6", "type": "instruct",
-        "params": "1.7B", "note": "HuggingFace", "highlight": False,
-    },
-    "Qwen2.5-0.5B": {
-        "id": "Qwen/Qwen2.5-0.5B-Instruct",
-        "color": "#3498DB", "type": "instruct",
-        "params": "500M", "note": "Alibaba", "highlight": False,
-    },
-    "Qwen2.5-1.5B": {
-        "id": "Qwen/Qwen2.5-1.5B-Instruct",
-        "color": "#E74C3C", "type": "instruct",
-        "params": "1.5B", "note": "Alibaba", "highlight": False,
+    "Llama 3.1 · 8B": {
+        "id": "llama-3.1-8b-instant",
+        "color": "#E74C3C",
+        "params": "8B",
+        "note": "Meta · fast",
     },
 }
 
 STARTERS = [
-    "Translate to Telugu: India's technology industry is transforming rapidly.",
-    "Translate to Hindi: The startup ecosystem raised $10 billion this year.",
-    "Tell me a short story set in Hyderabad (in Telugu).",
-    "Summarise in 3 bullets: Revenue ₹2,400 cr (+23% YoY), margin 18.5%, net profit ₹312 cr.",
-    "A startup burns ₹50L/month and has ₹6 cr raised. When does it run out of runway?",
-    "What are the top 3 risks of investing in early-stage Indian AI startups?",
+    "Translate to Telugu: India's technology industry is growing at an unprecedented pace.",
+    "Translate to Hindi: The startup ecosystem raised $10 billion in venture capital this year.",
+    "Tell a 3-sentence story set in Hyderabad, written in Telugu.",
+    "Summarise for investors: Revenue ₹2,400 cr (+23% YoY), operating margin 18.5%, net profit ₹312 cr.",
+    "A startup burns ₹50L/month, raised ₹6 crore. How many months of runway? Will it reach 18-month breakeven?",
+    "What are the top 3 risks of investing in an early-stage Indian AI foundation model startup?",
 ]
 
 FERTILITY = pd.DataFrame({
@@ -129,40 +120,56 @@ FERTILITY = pd.DataFrame({
     "SmolLM3-3B": [8.66, 13.56, 15.40, 17.77, 1.17],
 })
 
+LOCAL_CODE = '''from transformers import AutoModelForCausalLM, AutoTokenizer
+import torch
+
+model_name = "FrontiersMind/Nandi-Mini-600M-Early-Checkpoint"
+
+tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+model = AutoModelForCausalLM.from_pretrained(
+    model_name, trust_remote_code=True, dtype=torch.bfloat16
+).eval()
+
+model.config.kv_cache_mode = "shared"  # 50% memory saving
+
+prompt = "Translate to Telugu: India is growing rapidly."
+inputs = tokenizer([prompt], return_tensors="pt")
+out = model.generate(
+    **inputs, max_new_tokens=80, temperature=0.3,
+    do_sample=True, repetition_penalty=1.1,
+    pad_token_id=tokenizer.eos_token_id,
+)
+print(tokenizer.decode(out[0], skip_special_tokens=True))
+'''
+
 # ── Inference ──────────────────────────────────────────────────────────────────
-def call_model(name, cfg, message, max_tokens, temperature, hf_token):
+def call_groq(name, cfg, message, max_tokens, temperature, groq_key):
     start = time.time()
     try:
-        client = InferenceClient(provider="hf-inference", api_key=hf_token)
-
-        if cfg["type"] == "base":
-            text = client.text_generation(
-                model=cfg["id"],
-                prompt=message,
-                max_new_tokens=max_tokens,
-                temperature=max(temperature, 0.01),
-                repetition_penalty=1.1,
-                do_sample=True,
-            )
-        else:
-            resp = client.chat_completion(
-                model=cfg["id"],
-                messages=[{"role": "user", "content": message}],
-                max_tokens=max_tokens,
-                temperature=max(temperature, 0.01),
-            )
-            text = resp.choices[0].message.content or ""
-
+        resp = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {groq_key}", "Content-Type": "application/json"},
+            json={
+                "model": cfg["id"],
+                "messages": [{"role": "user", "content": message}],
+                "max_tokens": max_tokens,
+                "temperature": max(temperature, 0.01),
+            },
+            timeout=60,
+        )
+        if resp.status_code != 200:
+            raise Exception(f"HTTP {resp.status_code}: {resp.text[:200]}")
+        text = resp.json()["choices"][0]["message"]["content"]
         return {"model": name, "text": text.strip(), "time": time.time() - start, "error": None}
     except Exception as exc:
         return {"model": name, "text": "", "time": time.time() - start, "error": str(exc)}
 
 
-def run_all(selected, message, max_tokens, temperature, hf_token):
+def run_all(selected, message, max_tokens, temperature, groq_key):
     results = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(selected)) as ex:
         futures = {
-            ex.submit(call_model, n, MODELS[n], message, max_tokens, temperature, hf_token): n
+            ex.submit(call_groq, n, GROQ_MODELS[n], message, max_tokens, temperature, groq_key): n
             for n in selected
         }
         for f in concurrent.futures.as_completed(futures):
@@ -174,32 +181,33 @@ def run_all(selected, message, max_tokens, temperature, hf_token):
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("## ⚡ Nandi Arena")
-    st.caption("Investment Committee · Multi-Model Chatbot")
+    st.caption("Investment Committee · Multi-Model Chat")
     st.divider()
 
     try:
-        _secret = st.secrets.get("HF_TOKEN", "")
+        _secret = st.secrets.get("GROQ_API_KEY", "")
     except Exception:
         _secret = ""
 
-    hf_token = st.text_input(
-        "HuggingFace Token", value=_secret, type="password",
-        placeholder="hf_...",
-        help="Free read token from huggingface.co/settings/tokens",
+    groq_key = st.text_input(
+        "Groq API Key",
+        value=_secret,
+        type="password",
+        placeholder="gsk_...",
+        help="Free at console.groq.com — takes 30 seconds, no credit card.",
     )
-    if not hf_token:
-        st.warning("Add your HF token to start.")
+    if not groq_key:
+        st.warning("Get a free Groq key at [console.groq.com](https://console.groq.com)")
 
     st.divider()
-    st.markdown("**Select models**")
+    st.markdown("**Comparison models**")
     selected_models = []
-    for name, cfg in MODELS.items():
-        star = " ⭐" if cfg["highlight"] else ""
+    for name, cfg in GROQ_MODELS.items():
         if st.checkbox(f"{name}  `{cfg['params']}`", value=True, key=f"m_{name}"):
             selected_models.append(name)
 
     st.divider()
-    st.markdown("**Settings**")
+    st.markdown("**Generation settings**")
     max_tokens = st.slider("Max tokens", 50, 400, 200, 25)
     temperature = st.slider("Temperature", 0.0, 1.0, 0.4, 0.05)
 
@@ -207,53 +215,83 @@ with st.sidebar:
         st.session_state.history = []
         st.rerun()
 
+    st.divider()
+    st.markdown(
+        "<small>**Why Groq?** Nandi, Sarvam, and SmolLM2 aren't yet deployed on any cloud "
+        "inference provider — they run locally only. Groq hosts production-grade models "
+        "(Llama, Gemma) and is free to use, making it the best live comparison available.</small>",
+        unsafe_allow_html=True,
+    )
 
 # ── Session state ──────────────────────────────────────────────────────────────
 if "history" not in st.session_state:
     st.session_state.history = []
 
 # ── Main ───────────────────────────────────────────────────────────────────────
-tab_chat, tab_edge, tab_about = st.tabs(["💬 Chat Arena", "📊 Nandi's Indic Edge", "ℹ️ Models"])
+tab_chat, tab_edge, tab_local, tab_about = st.tabs([
+    "💬 Live Arena", "📊 Nandi's Indic Edge", "🖥️ Run Nandi Locally", "ℹ️ Models"
+])
 
+# ─────────────────────────────── LIVE ARENA ───────────────────────────────────
 with tab_chat:
-    st.markdown("### Ask anything — see all models respond simultaneously")
+    st.markdown("### Ask anything — Nandi ⭐ vs live models simultaneously")
+    st.caption("Nandi runs locally (see **Run Nandi Locally** tab). Comparison models run live via Groq.")
 
     # Starter prompts
     if not st.session_state.history:
         st.markdown("**Try a starter prompt:**")
         cols = st.columns(3)
         for i, s in enumerate(STARTERS):
-            if cols[i % 3].button(s[:55] + ("…" if len(s) > 55 else ""), key=f"s{i}"):
-                if hf_token and selected_models:
+            label = s[:52] + ("…" if len(s) > 52 else "")
+            if cols[i % 3].button(label, key=f"s{i}"):
+                if groq_key and selected_models:
                     with st.spinner("Running models…"):
-                        res = run_all(selected_models, s, max_tokens, temperature, hf_token)
-                    st.session_state.history.append({"user": s, "results": res, "models": selected_models})
+                        res = run_all(selected_models, s, max_tokens, temperature, groq_key)
+                    st.session_state.history.append(
+                        {"user": s, "results": res, "models": list(selected_models)}
+                    )
                     st.rerun()
 
     # Chat history
     for turn in st.session_state.history:
-        st.markdown(
-            f"<div class='user-bubble'>🧑 {turn['user']}</div>",
-            unsafe_allow_html=True,
-        )
-        n = len(turn["models"])
-        cols = st.columns(n)
-        for i, mname in enumerate(turn["models"]):
+        st.markdown(f"<div class='user-bubble'>🧑 {turn['user']}</div>", unsafe_allow_html=True)
+
+        # Nandi column + live model columns
+        live_models = turn["models"]
+        all_cols = st.columns(1 + len(live_models))
+
+        # Nandi placeholder
+        with all_cols[0]:
+            st.markdown(
+                "<div class='model-header' style='background:#FF6B3522; border-color:#FF6B35; color:#FF6B35;'>"
+                "Nandi-600M ⭐<br>"
+                "<span style='font-weight:400; color:#8b949e'>600M · 20% trained · Indic-optimised</span>"
+                "</div>"
+                "<div class='nandi-panel'>"
+                "🖥️ <strong>Local inference required</strong><br><br>"
+                "Nandi isn't yet on any cloud API. Run it on your machine — see the "
+                "<strong>Run Nandi Locally</strong> tab for the exact code.<br><br>"
+                "<span style='color:#FF6B35'>→ Tokenisation advantage: 7.5× fewer tokens for Telugu "
+                "vs Qwen — see Nandi's Indic Edge tab.</span>"
+                "</div>",
+                unsafe_allow_html=True,
+            )
+
+        # Live model outputs
+        for i, mname in enumerate(live_models):
             r = turn["results"].get(mname, {})
-            cfg = MODELS.get(mname, {})
+            cfg = GROQ_MODELS.get(mname, {})
             color = cfg.get("color", "#888")
-            with cols[i]:
+            with all_cols[i + 1]:
                 st.markdown(
                     f"<div class='model-header' style='background:{color}22; border-color:{color}; color:{color};'>"
-                    f"{mname}<br><span style='font-weight:400; color:#8b949e'>{cfg.get('params','')} · {cfg.get('note','')}</span>"
+                    f"{mname}<br>"
+                    f"<span style='font-weight:400; color:#8b949e'>{cfg.get('params','')} · {cfg.get('note','')}</span>"
                     f"</div>",
                     unsafe_allow_html=True,
                 )
                 if r.get("error"):
-                    st.markdown(
-                        f"<div class='error-box'>{r['error'][:250]}</div>",
-                        unsafe_allow_html=True,
-                    )
+                    st.markdown(f"<div class='error-box'>{r['error'][:200]}</div>", unsafe_allow_html=True)
                 else:
                     st.markdown(
                         f"<div class='model-output'>{r.get('text','') or '(no output)'}</div>",
@@ -265,7 +303,7 @@ with tab_chat:
                     )
         st.divider()
 
-    # Input
+    # Input form
     with st.form("chat_form", clear_on_submit=True):
         user_input = st.text_area(
             "Your message",
@@ -276,29 +314,30 @@ with tab_chat:
         submitted = st.form_submit_button("🚀  Send to all models")
 
     if submitted:
-        if not hf_token:
-            st.error("Add your HuggingFace token in the sidebar first.")
+        if not groq_key:
+            st.error("Add your Groq API key in the sidebar (free at console.groq.com).")
         elif not selected_models:
             st.error("Select at least one model in the sidebar.")
         elif not user_input.strip():
             st.warning("Type something first.")
         else:
             with st.spinner(f"Calling {len(selected_models)} models…"):
-                res = run_all(selected_models, user_input.strip(), max_tokens, temperature, hf_token)
+                res = run_all(selected_models, user_input.strip(), max_tokens, temperature, groq_key)
             st.session_state.history.append({
                 "user": user_input.strip(),
                 "results": res,
-                "models": selected_models,
+                "models": list(selected_models),
             })
             st.rerun()
 
 
-# ── Indic Edge tab ─────────────────────────────────────────────────────────────
+# ─────────────────────────────── INDIC EDGE ───────────────────────────────────
 with tab_edge:
-    st.subheader("Tokenization Fertility — Nandi's Structural Advantage")
+    st.subheader("Tokenisation Fertility — Nandi's Structural Advantage")
     st.markdown(
-        "**Fertility** = tokens per word. Lower is better: Nandi encodes Indic text "
-        "in far fewer tokens → lower inference cost, better context retention, higher accuracy."
+        "**Fertility** = tokens needed per word. Lower is better. "
+        "Nandi encodes Indic text in 7–8× fewer tokens than Qwen or SmolLM. "
+        "This reduces inference cost, increases context density, and improves accuracy on Indic tasks."
     )
 
     fig = go.Figure()
@@ -309,7 +348,7 @@ with tab_edge:
             marker_color=pal[col], text=FERTILITY[col], textposition="outside",
         ))
     fig.update_layout(
-        barmode="group", yaxis_title="Fertility (lower = better)",
+        barmode="group", yaxis_title="Fertility score (lower = better)",
         plot_bgcolor="#0d1117", paper_bgcolor="#0d1117",
         font_color="#e6edf3", height=380, legend=dict(bgcolor="#0d1117"),
     )
@@ -326,10 +365,10 @@ with tab_edge:
             "MMLU": [29.01, 25.55, 50.34],
             "Average": [44.10, 47.53, 49.75],
         }), use_container_width=True, hide_index=True)
-        st.caption("At 20% training, Nandi already approaches models trained on 16–180× more data.")
+        st.caption("At 20% training Nandi scores within ~7% of models trained on 16–180× more data.")
 
     with c2:
-        st.subheader("Telugu efficiency ratio vs Qwen3")
+        st.subheader("Telugu efficiency advantage over Qwen3")
         ratios = (FERTILITY["Qwen3-0.6B"] / FERTILITY["Nandi-600M"]).tolist()
         fig2 = go.Figure(go.Bar(
             x=FERTILITY["Language"].tolist(), y=ratios,
@@ -337,40 +376,98 @@ with tab_edge:
             text=[f"{r:.1f}×" for r in ratios], textposition="outside",
         ))
         fig2.update_layout(
-            yaxis_title="Nandi efficiency advantage",
+            yaxis_title="Nandi efficiency multiplier",
             plot_bgcolor="#0d1117", paper_bgcolor="#0d1117",
-            font_color="#e6edf3", height=320, margin=dict(t=20),
+            font_color="#e6edf3", height=320, margin=dict(t=10),
         )
         st.plotly_chart(fig2, use_container_width=True)
 
     st.info(
-        "📌 **Investor note:** Nandi's tokenisation advantage is architectural — "
-        "it persists and compounds as training scales. A 7.5× token reduction for Telugu "
-        "means 7.5× more context in the same window and proportionally lower API costs "
-        "for every Indian-language query."
+        "📌 **Investor note:** Tokenisation efficiency is an architectural property that persists "
+        "and compounds as Nandi trains further. At full training (~1.25T tokens), this advantage "
+        "translates directly to lower per-query cost and higher quality on every Indian-language workload."
     )
 
 
-# ── About tab ──────────────────────────────────────────────────────────────────
+# ─────────────────────────────── RUN LOCALLY ──────────────────────────────────
+with tab_local:
+    st.subheader("Running Nandi-Mini-600M on your machine")
+    st.markdown(
+        "Nandi isn't yet on any cloud inference API — it's too new. "
+        "It runs easily on a laptop CPU or any GPU. The shared-KV architecture "
+        "cuts memory usage by ~50% vs a standard transformer of the same size."
+    )
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("**Option A — Python (Transformers)**")
+        st.code(LOCAL_CODE, language="python")
+
+    with col2:
+        st.markdown("**Option B — Docker (one command)**")
+        st.code(
+            "docker model run hf.co/FrontiersMind/Nandi-Mini-600M-Early-Checkpoint",
+            language="bash",
+        )
+        st.caption("Creates a local OpenAI-compatible server at localhost:8000")
+
+        st.markdown("**Install**")
+        st.code("pip install transformers torch accelerate", language="bash")
+
+        st.markdown("**Model specs**")
+        st.markdown("""
+| Property | Value |
+|---|---|
+| Parameters | 600M |
+| Architecture | Transformer decoder |
+| KV Cache | Shared (50% memory saving) |
+| Context length | 2,048 (→ 32K planned) |
+| Languages | English + 10 Indic |
+| Training | 250B / ~1.25T tokens (20%) |
+| Precision | BF16 |
+| License | Apache 2.0 |
+        """)
+
+    st.info(
+        "💡 Once running locally, point this arena at your local endpoint by adding "
+        "`http://localhost:8000` as a custom model — or run the Transformers code above "
+        "and paste the output into the comparison manually."
+    )
+
+
+# ─────────────────────────────── ABOUT ────────────────────────────────────────
 with tab_about:
-    st.subheader("Models in this arena")
-    for name, cfg in MODELS.items():
-        with st.expander(f"{name}  —  {cfg['params']}  ·  {cfg['note']}"):
+    st.subheader("Live comparison models (via Groq)")
+    for name, cfg in GROQ_MODELS.items():
+        with st.expander(f"{name} — {cfg['params']} · {cfg['note']}"):
             st.code(cfg["id"], language=None)
-            st.write(f"**Type:** {cfg['type'].capitalize()}")
-            if cfg["highlight"]:
-                st.info(
-                    "Early pretraining checkpoint (250B / ~1.25T planned tokens). "
-                    "Architecture: Shared KV (50% memory saving), GQA, SwiGLU, RoPE. "
-                    "Supports English + 10 Indic languages."
-                )
+            st.write("Provider: **Groq** (free tier)")
+
     st.divider()
+    st.subheader("Why aren't Nandi / Sarvam / SmolLM2 in the live arena?")
     st.markdown("""
-**How inference works**
+These models are not yet deployed on any cloud inference provider:
 
-All models are called simultaneously via HuggingFace's own inference infrastructure
-(`provider="hf-inference"`). Base models (Nandi) receive a completion-style prompt;
-instruct models receive a chat message. Results race back and display as they arrive.
+| Model | Status |
+|---|---|
+| Nandi-Mini-600M | No provider — local only |
+| Sarvam-2B | No provider — local only |
+| SmolLM2-360M/1.7B | No provider — local only |
+| Qwen2.5-small variants | No provider — local only |
 
-**Token** — get a free read token at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens).
+HuggingFace's serverless inference only hosts a small subset of popular models.
+For any model not on a provider, the only option is local inference.
+
+The live arena uses Groq because it's **free**, **fast**, and **reliable** from Streamlit Cloud.
+    """)
+
+    st.divider()
+    st.subheader("Getting a Groq key")
+    st.markdown("""
+1. Go to [console.groq.com](https://console.groq.com)
+2. Sign up (no credit card required)
+3. Click **API Keys** → **Create API Key**
+4. Paste in the sidebar
+
+The free tier is very generous — thousands of tokens per minute.
     """)
