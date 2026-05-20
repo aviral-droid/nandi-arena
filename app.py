@@ -6,10 +6,10 @@ Concurrently tests Nandi-Mini-600M against peer small LLMs.
 import time
 import concurrent.futures
 
+import requests
 import streamlit as st
 import plotly.graph_objects as go
 import pandas as pd
-from huggingface_hub import InferenceClient
 
 # ── Page config ────────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -64,45 +64,59 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ── Model registry ─────────────────────────────────────────────────────────────
-# type: "base"     → uses text_generation endpoint, receives a completion-style prompt
-# type: "instruct" → uses chat_completion endpoint, receives the instruction prompt
+# type:          "base" → completion prompt   |  "instruct" → chat-template prompt
+# chat_template: "chatml" | "mistral" | "llama3" | None (base)
 MODELS: dict[str, dict] = {
     "Nandi-600M ⭐": {
         "id": "FrontiersMind/Nandi-Mini-600M-Early-Checkpoint",
         "color": "#FF6B35",
         "type": "base",
+        "chat_template": None,
         "params": "600M",
         "note": "250B tokens • 20% trained",
         "highlight": True,
+    },
+    "Sarvam-2B": {
+        "id": "sarvamai/sarvam-2b-v0.5",
+        "color": "#F39C12",
+        "type": "instruct",
+        "chat_template": "mistral",
+        "params": "2B",
+        "note": "Indic specialist • Sarvam AI",
+        "highlight": False,
     },
     "SmolLM2-360M": {
         "id": "HuggingFaceTB/SmolLM2-360M-Instruct",
         "color": "#2ECC71",
         "type": "instruct",
+        "chat_template": "chatml",
         "params": "360M",
         "note": "4T tokens • HuggingFace",
-        "highlight": False,
-    },
-    "Qwen2.5-0.5B": {
-        "id": "Qwen/Qwen2.5-0.5B-Instruct",
-        "color": "#3498DB",
-        "type": "instruct",
-        "params": "500M",
-        "note": "Benchmark comparison",
         "highlight": False,
     },
     "SmolLM2-1.7B": {
         "id": "HuggingFaceTB/SmolLM2-1.7B-Instruct",
         "color": "#9B59B6",
         "type": "instruct",
+        "chat_template": "chatml",
         "params": "1.7B",
-        "note": "3× size reference",
+        "note": "3× size • HuggingFace",
+        "highlight": False,
+    },
+    "Qwen2.5-0.5B": {
+        "id": "Qwen/Qwen2.5-0.5B-Instruct",
+        "color": "#3498DB",
+        "type": "instruct",
+        "chat_template": "chatml",
+        "params": "500M",
+        "note": "Benchmark comparison",
         "highlight": False,
     },
     "Qwen2.5-1.5B": {
         "id": "Qwen/Qwen2.5-1.5B-Instruct",
         "color": "#E74C3C",
         "type": "instruct",
+        "chat_template": "chatml",
         "params": "1.5B",
         "note": "Larger Qwen reference",
         "highlight": False,
@@ -245,6 +259,23 @@ BENCHMARKS = pd.DataFrame({
 })
 
 # ── Inference helpers ──────────────────────────────────────────────────────────
+def apply_chat_template(template: str, instruction: str) -> str:
+    """Wrap an instruction in the model's native chat format."""
+    if template == "chatml":
+        return f"<|im_start|>user\n{instruction}<|im_end|>\n<|im_start|>assistant\n"
+    if template == "mistral":
+        return f"[INST] {instruction} [/INST]"
+    if template == "llama3":
+        return (
+            "<|begin_of_text|>"
+            f"<|start_header_id|>user<|end_header_id|>\n\n{instruction}<|eot_id|>"
+            "<|start_header_id|>assistant<|end_header_id|>\n\n"
+        )
+    if template == "gemma":
+        return f"<start_of_turn>user\n{instruction}<end_of_turn>\n<start_of_turn>model\n"
+    return instruction
+
+
 def call_model(
     name: str,
     cfg: dict,
@@ -256,41 +287,47 @@ def call_model(
 ) -> dict:
     start = time.time()
     try:
-        client = InferenceClient(model=cfg["id"], token=hf_token)
-        prompt = base_prompt if cfg["type"] == "base" else instruct_prompt
-
-        if not prompt.strip():
+        raw = base_prompt if cfg["type"] == "base" else instruct_prompt
+        if not raw.strip():
             return {"model": name, "text": "", "time": 0.0, "error": "Empty prompt"}
 
-        if cfg["type"] == "instruct":
-            resp = client.chat_completion(
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=max_tokens,
-                temperature=max(temperature, 0.01),
-            )
-            text = resp.choices[0].message.content or ""
-        else:
-            text = client.text_generation(
-                prompt,
-                max_new_tokens=max_tokens,
-                temperature=max(temperature, 0.01),
-                repetition_penalty=1.1,
-                do_sample=True,
-            )
+        tmpl = cfg.get("chat_template")
+        prompt = apply_chat_template(tmpl, raw) if tmpl else raw
 
-        return {
-            "model": name,
-            "text": text.strip(),
-            "time": time.time() - start,
-            "error": None,
-        }
+        url = f"https://api-inference.huggingface.co/models/{cfg['id']}"
+        resp = requests.post(
+            url,
+            headers={"Authorization": f"Bearer {hf_token}"},
+            json={
+                "inputs": prompt,
+                "parameters": {
+                    "max_new_tokens": max_tokens,
+                    "temperature": max(temperature, 0.01),
+                    "repetition_penalty": 1.1,
+                    "return_full_text": False,
+                    "do_sample": True,
+                },
+                "options": {"wait_for_model": True, "use_cache": False},
+            },
+            timeout=120,
+        )
+
+        if resp.status_code != 200:
+            raise Exception(f"HTTP {resp.status_code} — {resp.text[:300]}")
+
+        data = resp.json()
+        if isinstance(data, list) and data:
+            text = data[0].get("generated_text", "")
+        elif isinstance(data, dict):
+            if "error" in data:
+                raise Exception(data["error"])
+            text = data.get("generated_text", str(data))
+        else:
+            text = str(data)
+
+        return {"model": name, "text": text.strip(), "time": time.time() - start, "error": None}
     except Exception as exc:
-        return {
-            "model": name,
-            "text": "",
-            "time": time.time() - start,
-            "error": str(exc),
-        }
+        return {"model": name, "text": "", "time": time.time() - start, "error": str(exc)}
 
 
 def run_concurrent(
