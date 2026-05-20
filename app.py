@@ -1,17 +1,16 @@
 """
-Nandi LLM Arena — Investment Committee Benchmark Tool
-Concurrently tests Nandi-Mini-600M against peer small LLMs.
+Nandi LLM Arena — Investment Committee Multi-Model Chatbot
+Type once, see all model responses side-by-side in real time.
 """
 
 import time
 import concurrent.futures
 
-import requests
 import streamlit as st
 import plotly.graph_objects as go
 import pandas as pd
+from huggingface_hub import InferenceClient
 
-# ── Page config ────────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="Nandi LLM Arena",
     page_icon="⚡",
@@ -21,227 +20,108 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-  .model-badge {
-    border-radius: 8px;
-    padding: 10px 14px;
-    margin-bottom: 8px;
-    font-size: 13px;
-    font-weight: 700;
-    border-left: 5px solid;
+  .user-bubble {
+    background: #1f3a5c;
+    border-radius: 12px 12px 4px 12px;
+    padding: 12px 16px;
+    margin: 16px 0 8px 0;
+    font-size: 15px;
+    color: #e6edf3;
+    display: inline-block;
+    max-width: 100%;
   }
-  .output-box {
+  .model-header {
+    border-radius: 8px 8px 0 0;
+    padding: 8px 12px;
+    font-size: 12px;
+    font-weight: 700;
+    border-left: 4px solid;
+  }
+  .model-output {
     background: #0d1117;
     border: 1px solid #30363d;
-    border-radius: 8px;
-    padding: 14px;
-    min-height: 140px;
+    border-top: none;
+    border-radius: 0 0 8px 8px;
+    padding: 12px 14px;
+    min-height: 100px;
     font-size: 13px;
-    line-height: 1.75;
+    line-height: 1.8;
     white-space: pre-wrap;
-    font-family: 'Segoe UI', 'Helvetica Neue', sans-serif;
     color: #e6edf3;
+    font-family: 'Segoe UI', system-ui, sans-serif;
   }
-  .timing {
-    font-size: 11px;
-    color: #8b949e;
-    margin-top: 4px;
+  .error-box {
+    background: #2d1a1a;
+    border: 1px solid #7f1d1d;
+    border-top: none;
+    border-radius: 0 0 8px 8px;
+    padding: 10px 14px;
+    font-size: 12px;
+    color: #fca5a5;
   }
-  .highlight-border {
-    border: 2px solid #FF6B35 !important;
-    box-shadow: 0 0 12px #FF6B3540;
+  .timing { font-size: 11px; color: #6e7681; margin-top: 4px; text-align: right; }
+  .starter-chip {
+    display: inline-block;
+    background: #21262d;
+    border: 1px solid #30363d;
+    border-radius: 20px;
+    padding: 6px 14px;
+    font-size: 13px;
+    color: #c9d1d9;
+    cursor: pointer;
+    margin: 4px;
   }
-  [data-testid="stButton"] button {
-    background: linear-gradient(135deg, #FF6B35 0%, #f7931e 100%);
-    color: white;
-    font-weight: 700;
-    font-size: 15px;
-    border: none;
-    border-radius: 8px;
-    padding: 10px 20px;
-    width: 100%;
+  [data-testid="stButton"] > button {
+    background: linear-gradient(135deg, #FF6B35, #f7931e);
+    color: white; font-weight: 700; border: none;
+    border-radius: 8px; padding: 8px 24px;
   }
 </style>
 """, unsafe_allow_html=True)
 
-# ── Model registry ─────────────────────────────────────────────────────────────
-# type:          "base" → completion prompt   |  "instruct" → chat-template prompt
-# chat_template: "chatml" | "mistral" | "llama3" | None (base)
-MODELS: dict[str, dict] = {
+# ── Models ─────────────────────────────────────────────────────────────────────
+MODELS = {
     "Nandi-600M ⭐": {
         "id": "FrontiersMind/Nandi-Mini-600M-Early-Checkpoint",
-        "color": "#FF6B35",
-        "type": "base",
-        "chat_template": None,
-        "params": "600M",
-        "note": "250B tokens • 20% trained",
-        "highlight": True,
+        "color": "#FF6B35", "type": "base",
+        "params": "600M", "note": "20% trained • Indic-optimised", "highlight": True,
     },
     "Sarvam-2B": {
         "id": "sarvamai/sarvam-2b-v0.5",
-        "color": "#F39C12",
-        "type": "instruct",
-        "chat_template": "mistral",
-        "params": "2B",
-        "note": "Indic specialist • Sarvam AI",
-        "highlight": False,
+        "color": "#F39C12", "type": "instruct",
+        "params": "2B", "note": "Indic specialist • Sarvam AI", "highlight": False,
     },
     "SmolLM2-360M": {
         "id": "HuggingFaceTB/SmolLM2-360M-Instruct",
-        "color": "#2ECC71",
-        "type": "instruct",
-        "chat_template": "chatml",
-        "params": "360M",
-        "note": "4T tokens • HuggingFace",
-        "highlight": False,
+        "color": "#2ECC71", "type": "instruct",
+        "params": "360M", "note": "HuggingFace", "highlight": False,
     },
     "SmolLM2-1.7B": {
         "id": "HuggingFaceTB/SmolLM2-1.7B-Instruct",
-        "color": "#9B59B6",
-        "type": "instruct",
-        "chat_template": "chatml",
-        "params": "1.7B",
-        "note": "3× size • HuggingFace",
-        "highlight": False,
+        "color": "#9B59B6", "type": "instruct",
+        "params": "1.7B", "note": "HuggingFace", "highlight": False,
     },
     "Qwen2.5-0.5B": {
         "id": "Qwen/Qwen2.5-0.5B-Instruct",
-        "color": "#3498DB",
-        "type": "instruct",
-        "chat_template": "chatml",
-        "params": "500M",
-        "note": "Benchmark comparison",
-        "highlight": False,
+        "color": "#3498DB", "type": "instruct",
+        "params": "500M", "note": "Alibaba", "highlight": False,
     },
     "Qwen2.5-1.5B": {
         "id": "Qwen/Qwen2.5-1.5B-Instruct",
-        "color": "#E74C3C",
-        "type": "instruct",
-        "chat_template": "chatml",
-        "params": "1.5B",
-        "note": "Larger Qwen reference",
-        "highlight": False,
+        "color": "#E74C3C", "type": "instruct",
+        "params": "1.5B", "note": "Alibaba", "highlight": False,
     },
 }
 
-# ── Task presets ───────────────────────────────────────────────────────────────
-# Each task has two prompt variants:
-#   base_prompt    → completion-style (for Nandi and other base models)
-#   instruct_prompt → instruction-style (for chat/instruct models)
-TASKS: dict[str, dict] = {
-    "🇮🇳 English → Telugu Translation": {
-        "base_prompt": (
-            "English: The technology sector in India is growing at an unprecedented rate, "
-            "attracting billions in global investments every year.\n"
-            "Telugu translation:"
-        ),
-        "instruct_prompt": (
-            "Translate the following sentence into Telugu:\n\n"
-            "The technology sector in India is growing at an unprecedented rate, "
-            "attracting billions in global investments every year."
-        ),
-        "insight": (
-            "Nandi's Telugu fertility score is **1.77** vs Qwen3's **13.38** — "
-            "meaning Nandi needs 7.5× fewer tokens to encode the same Telugu text. "
-            "This directly impacts generation quality and inference cost."
-        ),
-    },
-    "🇮🇳 Telugu Story Continuation": {
-        "base_prompt": (
-            "తెలుగు కథ: అనగనగా కృష్ణా నది ఒడ్డున ఒక చిన్న పల్లె ఉండేది. "
-            "ఆ పల్లెలో లక్ష్మి అనే తెలివైన అమ్మాయి నివసించేది. "
-            "ఒక రోజు ఆమె"
-        ),
-        "instruct_prompt": (
-            "Continue this Telugu story (write the continuation in Telugu only, 3-4 sentences):\n\n"
-            "తెలుగు కథ: అనగనగా కృష్ణా నది ఒడ్డున ఒక చిన్న పల్లె ఉండేది. "
-            "ఆ పల్లెలో లక్ష్మి అనే తెలివైన అమ్మాయి నివసించేది."
-        ),
-        "insight": (
-            "Native Telugu generation fluency test. Nandi is trained on 11 Indic languages "
-            "with an optimised tokeniser — expect significantly more natural Telugu output "
-            "compared to English-first models."
-        ),
-    },
-    "🌐 Bilingual Answer (English + Telugu)": {
-        "base_prompt": (
-            "Question: What are the main benefits of renewable energy for India?\n"
-            "English Answer: Renewable energy offers India several critical advantages:\n"
-            "Telugu Answer: పునరుత్పాదక శక్తి భారతదేశానికి కింది లాభాలు అందిస్తుంది:"
-        ),
-        "instruct_prompt": (
-            "Answer the following question in BOTH English and Telugu.\n\n"
-            "Question: What are the main benefits of renewable energy for India?\n\n"
-            "Format your response as:\n"
-            "English: [2-3 sentence answer]\n"
-            "Telugu: [Telugu translation of the answer]"
-        ),
-        "insight": (
-            "Dual-language output is directly relevant for India-focused investment reports "
-            "that need to reach regional stakeholders. Tests both comprehension and bilingual fluency."
-        ),
-    },
-    "💰 Financial Report Summary": {
-        "base_prompt": (
-            "Quarterly Financial Report — Q3 FY2025\n"
-            "Revenue: ₹2,400 crore (+23% YoY). Operating margin: 18.5% (+180bps). "
-            "Net profit: ₹312 crore. Digital services drove 60% of growth.\n"
-            "Investor summary:"
-        ),
-        "instruct_prompt": (
-            "Summarise this quarterly financial report in 3 concise bullet points for an investment committee:\n\n"
-            "Revenue: ₹2,400 crore (+23% YoY). Operating margin: 18.5% (+180bps). "
-            "Net profit: ₹312 crore. Digital services drove 60% of growth."
-        ),
-        "insight": (
-            "Practical investment-committee use case: rapid summarisation of financial data. "
-            "Tests domain-specific language comprehension and structured output."
-        ),
-    },
-    "🧠 Business Reasoning": {
-        "base_prompt": (
-            "A startup has a monthly burn rate of ₹50 lakh, has raised ₹6 crore, "
-            "and projects breaking even in 18 months. "
-            "Q: How many months of runway does it have, and will it reach breakeven in time?\n"
-            "A: The startup has"
-        ),
-        "instruct_prompt": (
-            "A startup has:\n"
-            "- Monthly burn rate: ₹50 lakh\n"
-            "- Total funds raised: ₹6 crore\n"
-            "- Projected breakeven: 18 months from now\n\n"
-            "Calculate how many months of runway it has and whether it will reach breakeven "
-            "before running out of funds. Show your working."
-        ),
-        "insight": (
-            "Multi-step arithmetic + business reasoning. Tests whether small models can "
-            "reliably handle financial word problems relevant to due diligence workflows."
-        ),
-    },
-    "🇮🇳 English → Hindi Translation": {
-        "base_prompt": (
-            "English: India's startup ecosystem raised over $10 billion in venture capital "
-            "funding during the first half of the year.\n"
-            "Hindi translation:"
-        ),
-        "instruct_prompt": (
-            "Translate the following into Hindi:\n\n"
-            "India's startup ecosystem raised over $10 billion in venture capital "
-            "funding during the first half of the year."
-        ),
-        "insight": (
-            "Hindi is another core Indic language in Nandi's training corpus. "
-            "Nandi's Hindi fertility is far lower than English-first models, "
-            "enabling more precise and efficient Hindi generation."
-        ),
-    },
-    "✏️ Custom Prompt": {
-        "base_prompt": "",
-        "instruct_prompt": "",
-        "insight": "Enter any prompt to test all models simultaneously.",
-    },
-}
+STARTERS = [
+    "Translate to Telugu: India's technology industry is transforming rapidly.",
+    "Translate to Hindi: The startup ecosystem raised $10 billion this year.",
+    "Tell me a short story set in Hyderabad (in Telugu).",
+    "Summarise in 3 bullets: Revenue ₹2,400 cr (+23% YoY), margin 18.5%, net profit ₹312 cr.",
+    "A startup burns ₹50L/month and has ₹6 cr raised. When does it run out of runway?",
+    "What are the top 3 risks of investing in early-stage Indian AI startups?",
+]
 
-# ── Static data for the insights tab ─────────────────────────────────────────
 FERTILITY = pd.DataFrame({
     "Language": ["Bengali", "Tamil", "Telugu", "Malayalam", "English"],
     "Nandi-600M": [1.44, 2.05, 1.77, 2.05, 1.18],
@@ -249,107 +129,44 @@ FERTILITY = pd.DataFrame({
     "SmolLM3-3B": [8.66, 13.56, 15.40, 17.77, 1.17],
 })
 
-BENCHMARKS = pd.DataFrame({
-    "Model": ["Nandi-600M ⭐ *early*", "SmolLM2-360M", "Qwen3-0.6B"],
-    "Tokens Trained": ["250B  (20%)", "4T", "36T"],
-    "HellaSwag": [44.86, 56.30, 53.77],
-    "WinoGrande": [54.77, 59.19, 59.19],
-    "MMLU": [29.01, 25.55, 50.34],
-    "Average": [44.10, 47.53, 49.75],
-})
-
-# ── Inference helpers ──────────────────────────────────────────────────────────
-def apply_chat_template(template: str, instruction: str) -> str:
-    """Wrap an instruction in the model's native chat format."""
-    if template == "chatml":
-        return f"<|im_start|>user\n{instruction}<|im_end|>\n<|im_start|>assistant\n"
-    if template == "mistral":
-        return f"[INST] {instruction} [/INST]"
-    if template == "llama3":
-        return (
-            "<|begin_of_text|>"
-            f"<|start_header_id|>user<|end_header_id|>\n\n{instruction}<|eot_id|>"
-            "<|start_header_id|>assistant<|end_header_id|>\n\n"
-        )
-    if template == "gemma":
-        return f"<start_of_turn>user\n{instruction}<end_of_turn>\n<start_of_turn>model\n"
-    return instruction
-
-
-def call_model(
-    name: str,
-    cfg: dict,
-    base_prompt: str,
-    instruct_prompt: str,
-    max_tokens: int,
-    temperature: float,
-    hf_token: str,
-) -> dict:
+# ── Inference ──────────────────────────────────────────────────────────────────
+def call_model(name, cfg, message, max_tokens, temperature, hf_token):
     start = time.time()
     try:
-        raw = base_prompt if cfg["type"] == "base" else instruct_prompt
-        if not raw.strip():
-            return {"model": name, "text": "", "time": 0.0, "error": "Empty prompt"}
+        client = InferenceClient(provider="hf-inference", api_key=hf_token)
 
-        tmpl = cfg.get("chat_template")
-        prompt = apply_chat_template(tmpl, raw) if tmpl else raw
-
-        url = f"https://api-inference.huggingface.co/models/{cfg['id']}"
-        resp = requests.post(
-            url,
-            headers={"Authorization": f"Bearer {hf_token}"},
-            json={
-                "inputs": prompt,
-                "parameters": {
-                    "max_new_tokens": max_tokens,
-                    "temperature": max(temperature, 0.01),
-                    "repetition_penalty": 1.1,
-                    "return_full_text": False,
-                    "do_sample": True,
-                },
-                "options": {"wait_for_model": True, "use_cache": False},
-            },
-            timeout=120,
-        )
-
-        if resp.status_code != 200:
-            raise Exception(f"HTTP {resp.status_code} — {resp.text[:300]}")
-
-        data = resp.json()
-        if isinstance(data, list) and data:
-            text = data[0].get("generated_text", "")
-        elif isinstance(data, dict):
-            if "error" in data:
-                raise Exception(data["error"])
-            text = data.get("generated_text", str(data))
+        if cfg["type"] == "base":
+            text = client.text_generation(
+                model=cfg["id"],
+                prompt=message,
+                max_new_tokens=max_tokens,
+                temperature=max(temperature, 0.01),
+                repetition_penalty=1.1,
+                do_sample=True,
+            )
         else:
-            text = str(data)
+            resp = client.chat_completion(
+                model=cfg["id"],
+                messages=[{"role": "user", "content": message}],
+                max_tokens=max_tokens,
+                temperature=max(temperature, 0.01),
+            )
+            text = resp.choices[0].message.content or ""
 
         return {"model": name, "text": text.strip(), "time": time.time() - start, "error": None}
     except Exception as exc:
         return {"model": name, "text": "", "time": time.time() - start, "error": str(exc)}
 
 
-def run_concurrent(
-    selected: list[str],
-    base_prompt: str,
-    instruct_prompt: str,
-    max_tokens: int,
-    temperature: float,
-    hf_token: str,
-) -> dict:
-    results: dict = {}
+def run_all(selected, message, max_tokens, temperature, hf_token):
+    results = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(selected)) as ex:
         futures = {
-            ex.submit(
-                call_model, name, MODELS[name],
-                base_prompt, instruct_prompt,
-                max_tokens, temperature, hf_token,
-            ): name
-            for name in selected
+            ex.submit(call_model, n, MODELS[n], message, max_tokens, temperature, hf_token): n
+            for n in selected
         }
-        for fut in concurrent.futures.as_completed(futures):
-            r = fut.result()
+        for f in concurrent.futures.as_completed(futures):
+            r = f.result()
             results[r["model"]] = r
     return results
 
@@ -357,286 +174,203 @@ def run_concurrent(
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("## ⚡ Nandi Arena")
-    st.caption("Investment Committee — LLM Benchmark")
+    st.caption("Investment Committee · Multi-Model Chatbot")
     st.divider()
 
-    # Read token from Streamlit secrets (for deployed app) or from user input
     try:
-        _secret_token = st.secrets.get("HF_TOKEN", "")
+        _secret = st.secrets.get("HF_TOKEN", "")
     except Exception:
-        _secret_token = ""
+        _secret = ""
+
     hf_token = st.text_input(
-        "HuggingFace Token",
-        value=_secret_token,
-        type="password",
+        "HuggingFace Token", value=_secret, type="password",
         placeholder="hf_...",
-        help="Free token at huggingface.co/settings/tokens — read access is sufficient.",
+        help="Free read token from huggingface.co/settings/tokens",
     )
     if not hf_token:
-        st.warning("Paste your HF token above to enable inference.")
+        st.warning("Add your HF token to start.")
 
     st.divider()
-    st.markdown("**Models to compare**")
-    selected_models: list[str] = []
+    st.markdown("**Select models**")
+    selected_models = []
     for name, cfg in MODELS.items():
-        label = f"{name}  `{cfg['params']}`"
-        if st.checkbox(label, value=True, key=f"chk_{name}"):
+        star = " ⭐" if cfg["highlight"] else ""
+        if st.checkbox(f"{name}  `{cfg['params']}`", value=True, key=f"m_{name}"):
             selected_models.append(name)
 
     st.divider()
-    st.markdown("**Generation settings**")
-    max_tokens = st.slider("Max new tokens", 50, 500, 180, 25)
-    temperature = st.slider("Temperature", 0.0, 1.0, 0.3, 0.05)
+    st.markdown("**Settings**")
+    max_tokens = st.slider("Max tokens", 50, 400, 200, 25)
+    temperature = st.slider("Temperature", 0.0, 1.0, 0.4, 0.05)
 
-    st.divider()
-    st.markdown(
-        "<small>Nandi-Mini-600M is an **early pretraining checkpoint** at 20% training. "
-        "Its tokenisation advantage is architecture-level and persists regardless of "
-        "checkpoint maturity.</small>",
-        unsafe_allow_html=True,
-    )
+    if st.button("🗑  Clear chat"):
+        st.session_state.history = []
+        st.rerun()
 
 
-# ── Main layout ────────────────────────────────────────────────────────────────
-st.markdown("# ⚡ Nandi LLM Arena")
-st.caption(
-    "Side-by-side concurrent benchmark · Nandi-Mini-600M vs SmolLM2, Qwen2.5 & peers"
-)
+# ── Session state ──────────────────────────────────────────────────────────────
+if "history" not in st.session_state:
+    st.session_state.history = []
 
-tab_compare, tab_insights, tab_about = st.tabs(
-    ["🏁 Live Comparison", "📊 Nandi's Indic Edge", "ℹ️ About the Models"]
-)
+# ── Main ───────────────────────────────────────────────────────────────────────
+tab_chat, tab_edge, tab_about = st.tabs(["💬 Chat Arena", "📊 Nandi's Indic Edge", "ℹ️ Models"])
 
-# ─────────────────────────────── TAB 1: COMPARISON ───────────────────────────
-with tab_compare:
-    task_name = st.selectbox("Task preset", list(TASKS.keys()))
-    task = TASKS[task_name]
+with tab_chat:
+    st.markdown("### Ask anything — see all models respond simultaneously")
 
-    st.info(f"💡 {task['insight']}")
+    # Starter prompts
+    if not st.session_state.history:
+        st.markdown("**Try a starter prompt:**")
+        cols = st.columns(3)
+        for i, s in enumerate(STARTERS):
+            if cols[i % 3].button(s[:55] + ("…" if len(s) > 55 else ""), key=f"s{i}"):
+                if hf_token and selected_models:
+                    with st.spinner("Running models…"):
+                        res = run_all(selected_models, s, max_tokens, temperature, hf_token)
+                    st.session_state.history.append({"user": s, "results": res, "models": selected_models})
+                    st.rerun()
 
-    if task_name == "✏️ Custom Prompt":
-        col1, col2 = st.columns(2)
-        with col1:
-            base_prompt = st.text_area(
-                "Prompt for base models (Nandi)",
-                height=130,
-                placeholder="Write a completion-style prompt…",
-                key="custom_base",
-            )
-        with col2:
-            instruct_prompt = st.text_area(
-                "Prompt for instruct models",
-                height=130,
-                placeholder="Write an instruction/question…",
-                key="custom_instruct",
-            )
-    else:
-        with st.expander("View / edit prompts", expanded=False):
-            col1, col2 = st.columns(2)
-            with col1:
-                base_prompt = st.text_area(
-                    "Base-model prompt",
-                    value=task["base_prompt"],
-                    height=130,
-                    key="base_prompt",
-                )
-            with col2:
-                instruct_prompt = st.text_area(
-                    "Instruct-model prompt",
-                    value=task["instruct_prompt"],
-                    height=130,
-                    key="instruct_prompt",
-                )
-
-    can_run = bool(hf_token and selected_models)
-    run_btn = st.button(
-        f"🚀  Run {len(selected_models)} Models Simultaneously",
-        disabled=not can_run,
-    )
-
-    if run_btn and can_run:
-        with st.spinner(f"Calling {len(selected_models)} models concurrently…"):
-            results = run_concurrent(
-                selected_models,
-                base_prompt,
-                instruct_prompt,
-                max_tokens,
-                temperature,
-                hf_token,
-            )
-
-        st.divider()
-        cols = st.columns(len(selected_models))
-
-        for i, name in enumerate(selected_models):
-            r = results.get(name, {})
-            cfg = MODELS[name]
+    # Chat history
+    for turn in st.session_state.history:
+        st.markdown(
+            f"<div class='user-bubble'>🧑 {turn['user']}</div>",
+            unsafe_allow_html=True,
+        )
+        n = len(turn["models"])
+        cols = st.columns(n)
+        for i, mname in enumerate(turn["models"]):
+            r = turn["results"].get(mname, {})
+            cfg = MODELS.get(mname, {})
+            color = cfg.get("color", "#888")
             with cols[i]:
-                extra_class = "highlight-border" if cfg["highlight"] else ""
                 st.markdown(
-                    f"<div class='model-badge {extra_class}' "
-                    f"style='background:{cfg['color']}18; border-color:{cfg['color']};'>"
-                    f"<span style='color:{cfg['color']}'>{name}</span><br>"
-                    f"<small style='color:#8b949e'>{cfg['params']} · {cfg['type']} · {cfg['note']}</small>"
+                    f"<div class='model-header' style='background:{color}22; border-color:{color}; color:{color};'>"
+                    f"{mname}<br><span style='font-weight:400; color:#8b949e'>{cfg.get('params','')} · {cfg.get('note','')}</span>"
                     f"</div>",
                     unsafe_allow_html=True,
                 )
-
                 if r.get("error"):
-                    st.error(r["error"][:200])
+                    st.markdown(
+                        f"<div class='error-box'>{r['error'][:250]}</div>",
+                        unsafe_allow_html=True,
+                    )
                 else:
-                    output_text = r.get("text", "(no output)")
                     st.markdown(
-                        f"<div class='output-box'>{output_text}</div>",
+                        f"<div class='model-output'>{r.get('text','') or '(no output)'}</div>",
                         unsafe_allow_html=True,
                     )
                     st.markdown(
-                        f"<div class='timing'>⏱ {r['time']:.2f}s</div>",
+                        f"<div class='timing'>⏱ {r.get('time', 0):.2f}s</div>",
                         unsafe_allow_html=True,
                     )
-
-        # Timing bar chart
         st.divider()
-        st.markdown("**Response times**")
-        timing_data = {
-            name: results[name]["time"]
-            for name in selected_models
-            if name in results and not results[name].get("error")
-        }
-        if timing_data:
-            fig_t = go.Figure(go.Bar(
-                x=list(timing_data.keys()),
-                y=list(timing_data.values()),
-                marker_color=[MODELS[n]["color"] for n in timing_data],
-                text=[f"{v:.2f}s" for v in timing_data.values()],
-                textposition="outside",
-            ))
-            fig_t.update_layout(
-                yaxis_title="Seconds",
-                plot_bgcolor="#0d1117",
-                paper_bgcolor="#0d1117",
-                font_color="#e6edf3",
-                height=260,
-                margin=dict(t=20, b=20),
-                showlegend=False,
-            )
-            st.plotly_chart(fig_t, use_container_width=True)
 
-    elif not hf_token:
-        st.markdown(
-            "<div style='text-align:center; padding:40px; color:#8b949e;'>"
-            "Enter your HuggingFace token in the sidebar to run models.</div>",
-            unsafe_allow_html=True,
+    # Input
+    with st.form("chat_form", clear_on_submit=True):
+        user_input = st.text_area(
+            "Your message",
+            placeholder="Ask in English, Telugu, Hindi, or any language…",
+            height=90,
+            label_visibility="collapsed",
         )
+        submitted = st.form_submit_button("🚀  Send to all models")
+
+    if submitted:
+        if not hf_token:
+            st.error("Add your HuggingFace token in the sidebar first.")
+        elif not selected_models:
+            st.error("Select at least one model in the sidebar.")
+        elif not user_input.strip():
+            st.warning("Type something first.")
+        else:
+            with st.spinner(f"Calling {len(selected_models)} models…"):
+                res = run_all(selected_models, user_input.strip(), max_tokens, temperature, hf_token)
+            st.session_state.history.append({
+                "user": user_input.strip(),
+                "results": res,
+                "models": selected_models,
+            })
+            st.rerun()
 
 
-# ────────────────────────────── TAB 2: INSIGHTS ──────────────────────────────
-with tab_insights:
-    st.subheader("Tokenization Fertility — Nandi's Core Advantage")
+# ── Indic Edge tab ─────────────────────────────────────────────────────────────
+with tab_edge:
+    st.subheader("Tokenization Fertility — Nandi's Structural Advantage")
     st.markdown(
-        "**Fertility** = average tokens per word. Lower is better: the model encodes the "
-        "same text in fewer tokens, reducing memory, inference cost, and information loss. "
-        "Nandi's tokeniser is purpose-built for Indic scripts."
+        "**Fertility** = tokens per word. Lower is better: Nandi encodes Indic text "
+        "in far fewer tokens → lower inference cost, better context retention, higher accuracy."
     )
 
-    fig_f = go.Figure()
-    palette = {"Nandi-600M": "#FF6B35", "Qwen3-0.6B": "#3498DB", "SmolLM3-3B": "#9B59B6"}
-    for col in ["Nandi-600M", "Qwen3-0.6B", "SmolLM3-3B"]:
-        fig_f.add_trace(go.Bar(
-            name=col,
-            x=FERTILITY["Language"],
-            y=FERTILITY[col],
-            marker_color=palette[col],
-            text=FERTILITY[col],
-            textposition="outside",
+    fig = go.Figure()
+    pal = {"Nandi-600M": "#FF6B35", "Qwen3-0.6B": "#3498DB", "SmolLM3-3B": "#9B59B6"}
+    for col in pal:
+        fig.add_trace(go.Bar(
+            name=col, x=FERTILITY["Language"], y=FERTILITY[col],
+            marker_color=pal[col], text=FERTILITY[col], textposition="outside",
         ))
-    fig_f.update_layout(
-        barmode="group",
-        yaxis_title="Fertility score (lower = better)",
-        plot_bgcolor="#0d1117",
-        paper_bgcolor="#0d1117",
-        font_color="#e6edf3",
-        height=420,
-        legend=dict(bgcolor="#0d1117"),
+    fig.update_layout(
+        barmode="group", yaxis_title="Fertility (lower = better)",
+        plot_bgcolor="#0d1117", paper_bgcolor="#0d1117",
+        font_color="#e6edf3", height=380, legend=dict(bgcolor="#0d1117"),
     )
-    st.plotly_chart(fig_f, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True)
 
-    st.markdown("---")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.subheader("Benchmark scores  (* early checkpoint)")
+        st.dataframe(pd.DataFrame({
+            "Model": ["Nandi-600M *", "SmolLM2-360M", "Qwen3-0.6B"],
+            "Tokens Trained": ["250B (20%)", "4T", "36T"],
+            "HellaSwag": [44.86, 56.30, 53.77],
+            "WinoGrande": [54.77, 59.19, 59.19],
+            "MMLU": [29.01, 25.55, 50.34],
+            "Average": [44.10, 47.53, 49.75],
+        }), use_container_width=True, hide_index=True)
+        st.caption("At 20% training, Nandi already approaches models trained on 16–180× more data.")
 
-    col_a, col_b = st.columns(2)
-    with col_a:
-        st.subheader("Benchmark scores (* early checkpoint)")
-        st.dataframe(BENCHMARKS, use_container_width=True, hide_index=True)
-        st.caption(
-            "Nandi is at 20% training. SmolLM2-360M used 4T tokens; "
-            "Qwen3-0.6B used 36T. Trajectory suggests strong convergence at full training."
-        )
-
-    with col_b:
-        st.subheader("Efficiency ratio: Telugu tokens")
-        langs = FERTILITY["Language"].tolist()
+    with c2:
+        st.subheader("Telugu efficiency ratio vs Qwen3")
         ratios = (FERTILITY["Qwen3-0.6B"] / FERTILITY["Nandi-600M"]).tolist()
-        fig_r = go.Figure(go.Bar(
-            x=langs,
-            y=ratios,
-            marker_color=["#FF6B35" if r > 3 else "#2ECC71" for r in ratios],
-            text=[f"{r:.1f}×" for r in ratios],
-            textposition="outside",
+        fig2 = go.Figure(go.Bar(
+            x=FERTILITY["Language"].tolist(), y=ratios,
+            marker_color=["#FF6B35"] * 5,
+            text=[f"{r:.1f}×" for r in ratios], textposition="outside",
         ))
-        fig_r.update_layout(
-            title="Qwen3-0.6B tokens ÷ Nandi tokens (higher = Nandi is more efficient)",
-            yaxis_title="Efficiency ratio",
-            plot_bgcolor="#0d1117",
-            paper_bgcolor="#0d1117",
-            font_color="#e6edf3",
-            height=340,
-            margin=dict(t=40),
+        fig2.update_layout(
+            yaxis_title="Nandi efficiency advantage",
+            plot_bgcolor="#0d1117", paper_bgcolor="#0d1117",
+            font_color="#e6edf3", height=320, margin=dict(t=20),
         )
-        st.plotly_chart(fig_r, use_container_width=True)
+        st.plotly_chart(fig2, use_container_width=True)
 
     st.info(
-        "📌 **Investment thesis context:** Nandi's tokenisation efficiency is a structural, "
-        "architecture-level advantage that compounds as training scales. "
-        "A 7.5× token reduction in Telugu means 7.5× more context fits in the same window, "
-        "lower serving costs per Indian-language query, and better downstream accuracy on "
-        "Indic-language tasks — all without any additional training."
+        "📌 **Investor note:** Nandi's tokenisation advantage is architectural — "
+        "it persists and compounds as training scales. A 7.5× token reduction for Telugu "
+        "means 7.5× more context in the same window and proportionally lower API costs "
+        "for every Indian-language query."
     )
 
 
-# ─────────────────────────────── TAB 3: ABOUT ────────────────────────────────
+# ── About tab ──────────────────────────────────────────────────────────────────
 with tab_about:
     st.subheader("Models in this arena")
-
     for name, cfg in MODELS.items():
-        with st.expander(f"{name} — {cfg['params']}"):
-            st.markdown(f"**HuggingFace ID:** `{cfg['id']}`")
-            st.markdown(f"**Type:** {cfg['type'].capitalize()} model")
-            st.markdown(f"**Notes:** {cfg['note']}")
+        with st.expander(f"{name}  —  {cfg['params']}  ·  {cfg['note']}"):
+            st.code(cfg["id"], language=None)
+            st.write(f"**Type:** {cfg['type'].capitalize()}")
             if cfg["highlight"]:
-                st.markdown(
-                    "⭐ **This is the investment target.** Early pretraining checkpoint "
-                    "(250B / ~1.25T planned tokens). Architecture: Transformer decoder "
-                    "with Shared KV (50% memory saving), GQA, SwiGLU, RoPE. "
-                    "Supports 11 languages: English + 10 Indic scripts."
+                st.info(
+                    "Early pretraining checkpoint (250B / ~1.25T planned tokens). "
+                    "Architecture: Shared KV (50% memory saving), GQA, SwiGLU, RoPE. "
+                    "Supports English + 10 Indic languages."
                 )
-
     st.divider()
-    st.subheader("Prompt strategy")
     st.markdown("""
-| Model type | Endpoint used | Prompt format |
-|---|---|---|
-| `base` (Nandi) | `text_generation` | Completion-style — model continues the text |
-| `instruct` (others) | `chat_completion` | Instruction/question — model follows the request |
+**How inference works**
 
-Both prompt variants are shown and editable in the **Live Comparison** tab.
-Keeping two variants ensures a fair comparison: each model gets the input format it was trained for.
-    """)
+All models are called simultaneously via HuggingFace's own inference infrastructure
+(`provider="hf-inference"`). Base models (Nandi) receive a completion-style prompt;
+instruct models receive a chat message. Results race back and display as they arrive.
 
-    st.subheader("Architecture highlights — Nandi")
-    st.markdown("""
-- **Shared KV cache** — reuses latent K/V projections, ~50% memory reduction vs vanilla MHA
-- **Factorised tied embeddings** — compact vocabulary representation (131K tokens)
-- **GQA + QK Norm + RMSNorm** — modern efficiency stack
-- **RoPE positional encoding** — standard for long-context extension
-- **Planned context:** 2,048 tokens now → 32,000 tokens at full training
+**Token** — get a free read token at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens).
     """)
