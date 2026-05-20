@@ -324,7 +324,10 @@ with st.sidebar:
     st.divider()
 
     # Read token from Streamlit secrets (for deployed app) or from user input
-    _secret_token = st.secrets.get("HF_TOKEN", "") if hasattr(st, "secrets") else ""
+    try:
+        _secret_token = st.secrets.get("HF_TOKEN", "")
+    except Exception:
+        _secret_token = ""
     hf_token = st.text_input(
         "HuggingFace Token",
         value=_secret_token,
