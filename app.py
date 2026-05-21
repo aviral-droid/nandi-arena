@@ -209,8 +209,12 @@ def call_model(name, cfg, message, max_tokens, temperature, groq_key, sarvam_key
         if resp.status_code != 200:
             raise Exception(f"HTTP {resp.status_code}: {resp.text[:300]}")
         body = resp.json()
-        text   = body["choices"][0]["message"]["content"]
-        tokens = body.get("usage", {}).get("completion_tokens", len(text.split()))
+        msg  = body["choices"][0].get("message", {})
+        # Sarvam (and some reasoning models) may put output in content or reasoning_content
+        text = (msg.get("content") or msg.get("reasoning_content") or
+                msg.get("text") or "")
+        tokens = body.get("usage", {}).get("completion_tokens",
+                 len(text.split()) if text else 0)
         return {"model": name, "text": text.strip(), "time": time.time() - start,
                 "tokens": tokens, "error": None}
     except Exception as exc:
