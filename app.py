@@ -76,33 +76,49 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ── Groq model registry ────────────────────────────────────────────────────────
-GROQ_MODELS = {
-    "Llama 3.2 · 1B": {
-        "id": "llama-3.2-1b-preview",
-        "color": "#3498DB",
-        "params": "1B",
-        "note": "Meta · similar size to Nandi",
-    },
-    "Llama 3.2 · 3B": {
-        "id": "llama-3.2-3b-preview",
-        "color": "#9B59B6",
-        "params": "3B",
-        "note": "Meta",
-    },
-    "Gemma 2 · 9B": {
-        "id": "gemma2-9b-it",
-        "color": "#2ECC71",
-        "params": "9B",
-        "note": "Google",
+# ── Model registry ─────────────────────────────────────────────────────────────
+# provider: "groq"   → api.groq.com       (key: groq_key)
+# provider: "sarvam" → api.sarvam.ai      (key: sarvam_key)
+MODELS = {
+    "Sarvam-30B 🇮🇳": {
+        "id": "sarvam-30b",
+        "provider": "sarvam",
+        "color": "#F39C12",
+        "params": "30B",
+        "note": "Indic specialist · Sarvam AI",
     },
     "Llama 3.1 · 8B": {
         "id": "llama-3.1-8b-instant",
-        "color": "#E74C3C",
+        "provider": "groq",
+        "color": "#3498DB",
         "params": "8B",
         "note": "Meta · fast",
     },
+    "Llama 3.3 · 70B": {
+        "id": "llama-3.3-70b-versatile",
+        "provider": "groq",
+        "color": "#9B59B6",
+        "params": "70B",
+        "note": "Meta",
+    },
+    "GPT-OSS · 20B": {
+        "id": "openai/gpt-oss-20b",
+        "provider": "groq",
+        "color": "#2ECC71",
+        "params": "20B",
+        "note": "OpenAI OSS · fast",
+    },
+    "GPT-OSS · 120B": {
+        "id": "openai/gpt-oss-120b",
+        "provider": "groq",
+        "color": "#E74C3C",
+        "params": "120B",
+        "note": "OpenAI OSS · largest",
+    },
 }
+
+# backwards-compat alias used in run_all
+GROQ_MODELS = MODELS
 
 STARTERS = [
     "Translate to Telugu: India's technology industry is growing at an unprecedented pace.",
@@ -143,12 +159,24 @@ print(tokenizer.decode(out[0], skip_special_tokens=True))
 '''
 
 # ── Inference ──────────────────────────────────────────────────────────────────
-def call_groq(name, cfg, message, max_tokens, temperature, groq_key):
+PROVIDER_URLS = {
+    "groq":   "https://api.groq.com/openai/v1/chat/completions",
+    "sarvam": "https://api.sarvam.ai/v1/chat/completions",
+}
+
+def call_model(name, cfg, message, max_tokens, temperature, groq_key, sarvam_key):
     start = time.time()
+    provider = cfg["provider"]
+    api_key = sarvam_key if provider == "sarvam" else groq_key
+
+    if not api_key:
+        label = "Sarvam" if provider == "sarvam" else "Groq"
+        return {"model": name, "text": "", "time": 0.0,
+                "error": f"{label} API key not provided — add it in the sidebar."}
     try:
         resp = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {groq_key}", "Content-Type": "application/json"},
+            PROVIDER_URLS[provider],
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
             json={
                 "model": cfg["id"],
                 "messages": [{"role": "user", "content": message}],
@@ -165,11 +193,12 @@ def call_groq(name, cfg, message, max_tokens, temperature, groq_key):
         return {"model": name, "text": "", "time": time.time() - start, "error": str(exc)}
 
 
-def run_all(selected, message, max_tokens, temperature, groq_key):
+def run_all(selected, message, max_tokens, temperature, groq_key, sarvam_key):
     results = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(selected)) as ex:
         futures = {
-            ex.submit(call_groq, n, GROQ_MODELS[n], message, max_tokens, temperature, groq_key): n
+            ex.submit(call_model, n, MODELS[n], message, max_tokens, temperature,
+                      groq_key, sarvam_key): n
             for n in selected
         }
         for f in concurrent.futures.as_completed(futures):
@@ -185,24 +214,31 @@ with st.sidebar:
     st.divider()
 
     try:
-        _secret = st.secrets.get("GROQ_API_KEY", "")
+        _groq_secret   = st.secrets.get("GROQ_API_KEY",   "")
+        _sarvam_secret = st.secrets.get("SARVAM_API_KEY", "")
     except Exception:
-        _secret = ""
+        _groq_secret = _sarvam_secret = ""
 
     groq_key = st.text_input(
-        "Groq API Key",
-        value=_secret,
-        type="password",
+        "Groq API Key", value=_groq_secret, type="password",
         placeholder="gsk_...",
-        help="Free at console.groq.com — takes 30 seconds, no credit card.",
+        help="Free at console.groq.com — no credit card needed.",
+    )
+    sarvam_key = st.text_input(
+        "Sarvam API Key", value=_sarvam_secret, type="password",
+        placeholder="sarvam_...",
+        help="Get at dashboard.sarvam.ai",
     )
     if not groq_key:
-        st.warning("Get a free Groq key at [console.groq.com](https://console.groq.com)")
+        st.warning("Add Groq key → [console.groq.com](https://console.groq.com) (free)")
+    if not sarvam_key:
+        st.info("Add Sarvam key → [dashboard.sarvam.ai](https://dashboard.sarvam.ai)")
 
     st.divider()
-    st.markdown("**Comparison models**")
+    st.markdown("**Models**")
     selected_models = []
-    for name, cfg in GROQ_MODELS.items():
+    for name, cfg in MODELS.items():
+        badge = "🇮🇳" if cfg["provider"] == "sarvam" else ""
         if st.checkbox(f"{name}  `{cfg['params']}`", value=True, key=f"m_{name}"):
             selected_models.append(name)
 
@@ -214,14 +250,6 @@ with st.sidebar:
     if st.button("🗑  Clear chat"):
         st.session_state.history = []
         st.rerun()
-
-    st.divider()
-    st.markdown(
-        "<small>**Why Groq?** Nandi, Sarvam, and SmolLM2 aren't yet deployed on any cloud "
-        "inference provider — they run locally only. Groq hosts production-grade models "
-        "(Llama, Gemma) and is free to use, making it the best live comparison available.</small>",
-        unsafe_allow_html=True,
-    )
 
 # ── Session state ──────────────────────────────────────────────────────────────
 if "history" not in st.session_state:
@@ -246,7 +274,7 @@ with tab_chat:
             if cols[i % 3].button(label, key=f"s{i}"):
                 if groq_key and selected_models:
                     with st.spinner("Running models…"):
-                        res = run_all(selected_models, s, max_tokens, temperature, groq_key)
+                        res = run_all(selected_models, s, max_tokens, temperature, groq_key, sarvam_key)
                     st.session_state.history.append(
                         {"user": s, "results": res, "models": list(selected_models)}
                     )
@@ -322,7 +350,7 @@ with tab_chat:
             st.warning("Type something first.")
         else:
             with st.spinner(f"Calling {len(selected_models)} models…"):
-                res = run_all(selected_models, user_input.strip(), max_tokens, temperature, groq_key)
+                res = run_all(selected_models, user_input.strip(), max_tokens, temperature, groq_key, sarvam_key)
             st.session_state.history.append({
                 "user": user_input.strip(),
                 "results": res,
@@ -437,11 +465,12 @@ with tab_local:
 
 # ─────────────────────────────── ABOUT ────────────────────────────────────────
 with tab_about:
-    st.subheader("Live comparison models (via Groq)")
-    for name, cfg in GROQ_MODELS.items():
+    st.subheader("Live comparison models")
+    for name, cfg in MODELS.items():
         with st.expander(f"{name} — {cfg['params']} · {cfg['note']}"):
             st.code(cfg["id"], language=None)
-            st.write("Provider: **Groq** (free tier)")
+            provider_label = "**Sarvam AI** (dashboard.sarvam.ai)" if cfg["provider"] == "sarvam" else "**Groq** (free tier — console.groq.com)"
+            st.write(f"Provider: {provider_label}")
 
     st.divider()
     st.subheader("Why aren't Nandi / Sarvam / SmolLM2 in the live arena?")
